@@ -1,0 +1,48 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main # Or the branch you use for production
+
+jobs:
+  # Job to deploy the application
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production # Link to the environment created above
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Add your build and test steps here
+      - name: Build application
+        run: echo "Building application..."
+
+      # Add the actual deployment script here.
+      # The failure of this step is what triggers the rollback job.
+      - name: Deploy to production
+        id: deployment
+        run: |
+          echo "Deploying to production environment..."
+          # Replace with your actual deployment commands, e.g., to a cloud provider
+          # exit 1 # Uncomment this to test a deployment failure
+        env:
+          MY_SECRET: ${{ secrets.MY_SECRET }}
+
+  # Job to execute rollback if the 'deploy' job fails
+  rollback:
+    runs-on: ubuntu-latest
+    needs: deploy # Wait for the deploy job to finish
+    if: ${{ always() && needs.deploy.result == 'failure' }} # Run only if the deploy job failed
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Rollback deployment
+        run: |
+          echo "Deployment failed. Starting rollback..."
+          # Add your rollback commands here
+          # This could be a script that deploys the last known good version
+          # Or, if using a service like Kubernetes, a command to revert a deployment
