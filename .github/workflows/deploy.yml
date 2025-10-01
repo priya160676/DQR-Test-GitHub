@@ -1,48 +1,66 @@
-name: Deploy to Production
+name: Deployment Pipeline
 
 on:
   push:
     branches:
-      - main # Or the branch you use for production
+      - main # Trigger on push to the main branch
 
 jobs:
-  # Job to deploy the application
-  deploy:
+  deployment:
     runs-on: ubuntu-latest
-    environment: production # Link to the environment created above
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      # Step 1: Checkout the repository code
+      - name: Checkout Repository
+        uses: actions/checkout@v2
 
-      # Add your build and test steps here
-      - name: Build application
-        run: echo "Building application..."
+      # Step 2: Set up your environment (install dependencies, etc.)
+      - name: Set up Node.js (or your language/environment)
+        uses: actions/setup-node@v2
+        with:
+          node-version: '14'  # Specify the appropriate version for your stack
 
-      # Add the actual deployment script here.
-      # The failure of this step is what triggers the rollback job.
-      - name: Deploy to production
-        id: deployment
+      # Step 3: Run your deployment script (replace with your actual deploy script)
+      - name: Run Deployment Script
         run: |
-          echo "Deploying to production environment..."
-          # Replace with your actual deployment commands, e.g., to a cloud provider
-          # exit 1 # Uncomment this to test a deployment failure
-        env:
-          MY_SECRET: ${{ secrets.MY_SECRET }}
-
-  # Job to execute rollback if the 'deploy' job fails
-  rollback:
-    runs-on: ubuntu-latest
-    needs: deploy # Wait for the deploy job to finish
-    if: ${{ always() && needs.deploy.result == 'failure' }} # Run only if the deploy job failed
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Rollback deployment
+          ./deploy.sh
+          
+      # Step 4: Capture deployment quality rate (Success/Failure)
+      - name: Capture Deployment Quality Rate
+        id: quality-rate
         run: |
-          echo "Deployment failed. Starting rollback..."
-          # Add your rollback commands here
-          # This could be a script that deploys the last known good version
-          # Or, if using a service like Kubernetes, a command to revert a deployment
+          if [ $? -eq 0 ]; then
+            echo "Deployment Quality Rate: 100% (Success)" >> $GITHUB_ENV
+          else
+            echo "Deployment Quality Rate: 0% (Failure)" >> $GITHUB_ENV
+            exit 1  # Exit with failure status to trigger rollback
+          fi
+
+      # Step 5: Generate JSON logs on success
+      - name: Generate Success Log (JSON)
+        if: success()  # Only runs if previous steps succeeded
+        run: |
+          echo "{\"status\": \"success\", \"deployment_quality_rate\": \"100%\", \"timestamp\": \"$(date)\"}" > deployment_logs.json
+
+      # Step 6: Upload logs as an artifact if successful
+      - name: Upload Success Artifact
+        if: success()  # Only runs if previous steps succeeded
+        uses: actions/upload-artifact@v2
+        with:
+          name: deployment-logs
+          path: deployment_logs.json
+
+      # Step 7: Trigger rollback in case of failure
+      - name: Trigger Rollback (Failure)
+        if: failure()  # Runs only if the pipeline fails
+        run: |
+          echo "Deployment failed. Triggering rollback..."
+          ./rollback.sh
+
+      # Step 8: Upload previous version artifact (for rollback)
+      - name: Upload Previous Deployment Artifact
+        if: failure()  # Only runs if rollback is triggered
+        uses: actions/upload-artifact@v2
+        with:
+          name: previous-deployment
+          path: ./previous_version_directory/  # Adjust path to where backup/artifacts are stored
