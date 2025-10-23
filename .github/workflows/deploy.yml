@@ -1,66 +1,99 @@
-name: Deployment Pipeline
+name: .NET Release + Log
 
 on:
-  push:
-    branches:
-      - main # Trigger on push to the main branch
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Build"]
+    types:
+      - completed
+  repository_dispatch:
+    types: [trigger-release]
 
+permissions:
+  contents: write
+  actions: write
+  
 jobs:
-  deployment:
-    runs-on: ubuntu-latest
+  release:
+    # if: >
+    #   github.event_name == 'repository_dispatch' ||
+    #   (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    
+ 
+      if: ${{ github.event_name == 'repository_dispatch' ||
+              (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+              github.event_name == 'workflow_dispatch' }}
 
-    steps:
-      # Step 1: Checkout the repository code
-      - name: Checkout Repository
-        uses: actions/checkout@v2
 
-      # Step 2: Set up your environment (install dependencies, etc.)
-      - name: Set up Node.js (or your language/environment)
-        uses: actions/setup-node@v2
-        with:
-          node-version: '14'  # Specify the appropriate version for your stack
+      runs-on: ubuntu-latest
 
-      # Step 3: Run your deployment script (replace with your actual deploy script)
-      - name: Run Deployment Script
-        run: |
-          ./deploy.sh
-          
-      # Step 4: Capture deployment quality rate (Success/Failure)
-      - name: Capture Deployment Quality Rate
-        id: quality-rate
-        run: |
-          if [ $? -eq 0 ]; then
-            echo "Deployment Quality Rate: 100% (Success)" >> $GITHUB_ENV
-          else
-            echo "Deployment Quality Rate: 0% (Failure)" >> $GITHUB_ENV
-            exit 1  # Exit with failure status to trigger rollback
-          fi
-
-      # Step 5: Generate JSON logs on success
-      - name: Generate Success Log (JSON)
-        if: success()  # Only runs if previous steps succeeded
-        run: |
-          echo "{\"status\": \"success\", \"deployment_quality_rate\": \"100%\", \"timestamp\": \"$(date)\"}" > deployment_logs.json
-
-      # Step 6: Upload logs as an artifact if successful
-      - name: Upload Success Artifact
-        if: success()  # Only runs if previous steps succeeded
-        uses: actions/upload-artifact@v2
-        with:
-          name: deployment-logs
-          path: deployment_logs.json
-
-      # Step 7: Trigger rollback in case of failure
-      - name: Trigger Rollback (Failure)
-        if: failure()  # Runs only if the pipeline fails
-        run: |
-          echo "Deployment failed. Triggering rollback..."
-          ./rollback.sh
-
-      # Step 8: Upload previous version artifact (for rollback)
-      - name: Upload Previous Deployment Artifact
-        if: failure()  # Only runs if rollback is triggered
-        uses: actions/upload-artifact@v2
-        with:
-          name: previous-deployment
-          path: ./previous_version_directory/  # Adjust path to where backup/artifacts are stored
+      steps:
+        - name: Get artifact download URL
+          run: |
+            echo "Triggered by workflow run ID: ${{ github.event.workflow_run.id }}"
+  
+        - name: Download artifact from triggering workflow
+          uses: dawidd6/action-download-artifact@v2
+          with:
+            workflow: ${{ github.event.workflow_run.workflow_id }}
+            run_id: ${{ github.event.workflow_run.id }}
+            name: build-artifact
+            path: ./artifact
+  
+        - name: List downloaded files
+          run: ls -R ./artifact
+  
+        - name: Azure Login
+          uses: azure/login@v1
+          with:
+            creds: ${{ secrets.AZURE_CREDENTIALS }}
+  
+        - name: Deploy to Azure Web App
+          uses: azure/webapps-deploy@v2
+          with:
+            app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
+            package: ./artifact
+  
+        - name: Checkout repo
+          uses: actions/checkout@v4
+  
+        - name: Clone repo for updating deployment log
+          env:
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          run: |
+            git config --global user.name "github-actions"
+            git config --global user.email "github-actions@github.com"
+            git clone --single-branch --branch DevOps https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }} repo
+  
+        - name: Generate & Append deployment log
+          if: always()
+          run: |
+            cd repo
+            mkdir -p .github/data
+            LOG_FILE=".github/data/deployments.json"
+  
+            if [ ! -f "$LOG_FILE" ]; then echo "[]" > "$LOG_FILE"; fi
+  
+            cat > new_entry.json <<EOF
+            {
+              "deployment_id": "${{ github.run_id }}",
+              "repo": "${{ github.repository }}",
+              "status": "${{ job.status }}",
+              "rollback": false,
+              "timestamp": "${{ github.run_started_at }}",
+              "date": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            }
+            EOF
+  
+            jq --argjson new_entry "$(cat new_entry.json)" '. += [$new_entry]' "$LOG_FILE" > tmp.json && mv tmp.json "$LOG_FILE"
+  
+        - name: Commit deployment log to repo
+          if: always()
+          env:
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          run: |
+            cd repo
+            git add .github/data/deployments.json
+            git commit -m "Update deployment log: ${{ github.run_id }}" || echo "Nothing to commit"
+            git pull --rebase origin DevOps || true
+            git push origin HEAD:DevOps
