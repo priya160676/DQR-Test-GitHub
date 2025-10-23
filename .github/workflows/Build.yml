@@ -1,1 +1,128 @@
 
+name: Build
+
+on:
+  push:
+    branches:
+      - DevOps
+  pull_request:
+    branches:
+      - DevOps
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+  pull-requests: write
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    outputs:
+      artifact-path: ${{ steps.publish.outputs.path }}
+      build-version: ${{ steps.version.outputs.version }}
+      commit-sha: ${{ github.sha }}
+      pr-number: ${{ github.event.pull_request.number }}
+      pr-user: ${{ github.event.pull_request.user.login }}
+      pr-title: ${{ github.event.pull_request.title }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore BaseWebAPI-main/BaseWebAPI.sln
+      
+      - name: Build
+        run: dotnet build BaseWebAPI-main/BaseWebAPI.sln --no-restore --configuration Release
+      
+      - name: Test
+        run: dotnet test BaseWebAPI-main/BaseWebAPI.sln --no-build --verbosity normal
+        
+      - name: Publish
+        id: publish
+        run: |
+          dotnet publish BaseWebAPI-main/BaseWebAPI.sln --configuration Release --output publish -warnaserror:false
+          echo "path=publish" >> $GITHUB_OUTPUT
+
+      - name: Generate build version
+        id: version
+        run: echo "version=1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+        
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifact
+          path: ${{ steps.publish.outputs.path }}
+
+      - name: Clone repo for updating build log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git clone --single-branch --branch DevOps https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }} repo
+
+      - name: Update build deployment log
+        if: always()
+        run: |
+          cd repo
+          LOG_FILE=".github/data/builddeployments.json"
+
+          if [ ! -f "$LOG_FILE" ]; then
+            echo "[]" > "$LOG_FILE"
+          fi
+
+          cat > new_entry.json <<EOF
+          {
+            "deployment_id": "${{ github.run_id }}",
+            "repo": "${{ github.repository }}",
+            "status": "${{ job.status }}",
+            "rollback": false,
+            "timestamp": "${{ github.run_started_at }}",
+            "date": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          }
+          EOF
+
+          jq --argjson new_entry "$(cat new_entry.json)" '. += [$new_entry]' "$LOG_FILE" > tmp.json && mv tmp.json "$LOG_FILE"
+
+      - name: Commit build log
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd repo
+          git add .github/data/builddeployments.json
+          git commit -m "Update build log: ${{ github.run_id }}" || echo "No changes to commit"
+          git pull --rebase origin DevOps || true
+          git push origin HEAD:DevOps
+
+      - name: Upload build deployment log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: repo/.github/data/builddeployments.json
+      - name: Check that GH_PAT is set
+        run: |
+          if [ -z "${{ secrets.PERSONAL_ACCESS_TOKEN }}" ]; then
+            echo " PERSONAL_ACCESS_TOKEN is NOT set!"
+            exit 1
+          else
+            echo " PERSONAL_ACCESS_TOKEN is set."
+          fi
+
+      - name: Trigger Release Workflow
+        if: ${{ success() }}
+        env:
+          GH_PAT: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          curl -X POST "https://api.github.com/repos/${{ github.repository }}/dispatches" -H "Accept: application/vnd.github+json" -H "Authorization: token $GH_PAT" -d '{"event_type":"trigger-release"}'
