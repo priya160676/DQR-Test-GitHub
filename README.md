@@ -1,1 +1,0 @@
-# DQR-Test-GitHub
